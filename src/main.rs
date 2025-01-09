@@ -3,9 +3,13 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn get_next_ts(start: SystemTime, now: SystemTime, step: Duration) -> SystemTime {
-    let delay_secs = step.as_secs();
-    let cycles = now.duration_since(start).unwrap().as_secs() / delay_secs + 1;
-    start + Duration::from_secs(delay_secs * cycles)
+    start
+        + step.mul_f64(
+            now.duration_since(start)
+                .unwrap()
+                .div_duration_f64(step)
+                .ceil(),
+        )
 }
 
 struct Timer {
@@ -15,10 +19,10 @@ struct Timer {
 }
 
 impl Timer {
-    fn build(delay: Duration, start: SystemTime, callback: fn(SystemTime) -> ()) -> Timer {
+    fn build_aligned(delay: Duration, callback: fn(SystemTime) -> (), now: SystemTime) -> Timer {
         Timer {
             delay,
-            next_timestamp: start,
+            next_timestamp: get_next_ts(UNIX_EPOCH, now, delay),
             callback,
         }
     }
@@ -40,17 +44,10 @@ struct Scheduler {
 }
 
 impl Scheduler {
-    fn build(params: Vec<(Duration, Option<SystemTime>, fn(SystemTime) -> ())>) -> Scheduler {
-        let now = SystemTime::now(); // del
+    fn build_aligned(params: Vec<(Duration, fn(SystemTime) -> ())>, now: SystemTime) -> Scheduler {
         let timers: Vec<Timer> = params
             .into_iter()
-            .map(|(delay, start, callback)| {
-                Timer::build(
-                    delay,
-                    start.unwrap_or(get_next_ts(UNIX_EPOCH, now, delay)),
-                    callback,
-                )
-            })
+            .map(|(delay, callback)| Timer::build_aligned(delay, callback, now))
             .collect();
         let next_timestamp = timers.iter().map(|timer| timer.next_timestamp).min();
         Scheduler {
@@ -71,17 +68,26 @@ impl Scheduler {
     }
 }
 
-fn main() {
-    let mut sched = Scheduler::build(vec![
-        (Duration::from_secs(10), None, |x| println!("commit {x:?}")),
-        (Duration::from_secs(1), None, |x| println!("update {x:?}")),
-    ]);
+fn real_sleep(until: SystemTime, interval: Duration) -> SystemTime {
     loop {
         let now = SystemTime::now();
+        match until.duration_since(now) {
+            Ok(duration) => thread::sleep(min(duration, interval)),
+            Err(_) => return now,
+        }
+    }
+}
+
+fn main() {
+    let mut sched = Scheduler::build_aligned(
+        vec![
+            (Duration::from_secs(10), |x| println!("commit {x:?}")),
+            (Duration::from_secs(1), |x| println!("update {x:?}")),
+        ],
+        SystemTime::now(),
+    );
+    loop {
+        let now = real_sleep(sched.next_timestamp.unwrap(), Duration::from_secs(1));
         sched.run_pending(now);
-        thread::sleep(min(
-            sched.next_timestamp.unwrap().duration_since(now).unwrap(),
-            Duration::from_millis(1300),
-        ));
     }
 }
