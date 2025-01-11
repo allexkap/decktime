@@ -1,93 +1,49 @@
-use std::cmp::min;
-use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+mod db;
+mod schedule;
 
-fn get_next_ts(start: SystemTime, now: SystemTime, step: Duration) -> SystemTime {
-    start
-        + step.mul_f64(
-            now.duration_since(start)
-                .unwrap()
-                .div_duration_f64(step)
-                .ceil(),
-        )
-}
-
-struct Timer {
-    delay: Duration,
-    next_timestamp: SystemTime,
-    callback: fn(SystemTime) -> (),
-}
-
-impl Timer {
-    fn build_aligned(delay: Duration, callback: fn(SystemTime) -> (), now: SystemTime) -> Timer {
-        Timer {
-            delay,
-            next_timestamp: get_next_ts(UNIX_EPOCH, now, delay),
-            callback,
-        }
-    }
-
-    fn check(&mut self, now: SystemTime) {
-        if self.next_timestamp <= now {
-            (self.callback)(now);
-            self.next_timestamp += self.delay;
-            if self.next_timestamp <= now {
-                self.next_timestamp = get_next_ts(self.next_timestamp, now, self.delay);
-            }
-        }
-    }
-}
-
-struct Scheduler {
-    timers: Vec<Timer>,
-    next_timestamp: Option<SystemTime>,
-}
-
-impl Scheduler {
-    fn build_aligned(params: Vec<(Duration, fn(SystemTime) -> ())>, now: SystemTime) -> Scheduler {
-        let timers: Vec<Timer> = params
-            .into_iter()
-            .map(|(delay, callback)| Timer::build_aligned(delay, callback, now))
-            .collect();
-        let next_timestamp = timers.iter().map(|timer| timer.next_timestamp).min();
-        Scheduler {
-            timers,
-            next_timestamp,
-        }
-    }
-
-    fn run_pending(&mut self, now: SystemTime) {
-        self.next_timestamp = self
-            .timers
-            .iter_mut()
-            .map(|timer| {
-                timer.check(now);
-                timer.next_timestamp
-            })
-            .min();
-    }
-}
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    time::{Duration, SystemTime},
+};
+use std::{cmp, thread};
 
 fn real_sleep(until: SystemTime, interval: Duration) -> SystemTime {
     loop {
         let now = SystemTime::now();
         match until.duration_since(now) {
-            Ok(duration) => thread::sleep(min(duration, interval)),
+            Ok(duration) => thread::sleep(cmp::min(duration, interval)),
             Err(_) => return now,
         }
     }
 }
 
 fn main() {
-    let mut sched = Scheduler::build_aligned(
+    env_logger::builder().format_timestamp_millis().init();
+
+    let mut db = db::AppDB::build("/mnt/c/_/deck.db").unwrap();
+
+    let now = SystemTime::now();
+    db.commit(now).unwrap();
+
+    let ref_db1 = Rc::new(RefCell::new(db));
+    let ref_db2 = Rc::clone(&ref_db1);
+    let mut sched = schedule::Scheduler::build_aligned(
         vec![
-            (Duration::from_secs(10), |x| println!("commit {x:?}")),
-            (Duration::from_secs(1), |x| println!("update {x:?}")),
+            (
+                Duration::from_secs(10),
+                Box::new(move |x| ref_db1.borrow_mut().commit(x).unwrap()),
+            ),
+            (
+                Duration::from_secs(1),
+                Box::new(move |_| ref_db2.borrow_mut().update("123", 1)),
+            ),
         ],
-        SystemTime::now(),
+        now,
     );
+
     loop {
-        let now = real_sleep(sched.next_timestamp.unwrap(), Duration::from_secs(1));
+        let now = real_sleep(sched.get_next_timestamp().unwrap(), Duration::from_secs(1));
         sched.run_pending(now);
     }
 }
