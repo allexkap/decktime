@@ -1,7 +1,7 @@
 use log::warn;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-type Callback = Box<dyn Fn(SystemTime)>;
+type Callback = Box<dyn FnMut(SystemTime)>;
 
 fn get_next_ts(start: SystemTime, now: SystemTime, step: Duration) -> SystemTime {
     start
