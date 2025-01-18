@@ -3,6 +3,7 @@ mod observer;
 mod schedule;
 
 use clap::Parser;
+use log::info;
 use std::{
     cell::RefCell,
     cmp,
@@ -45,7 +46,8 @@ fn real_sleep(until: SystemTime, interval: Duration) -> SystemTime {
 }
 
 fn main() {
-    env_logger::builder().format_timestamp_millis().init();
+    env_logger::builder().format_timestamp(None).init();
+    info!("version {}", env!("CARGO_PKG_VERSION"));
 
     let args = Args::parse();
 

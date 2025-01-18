@@ -1,4 +1,4 @@
-use log::info;
+use log::{debug, info};
 use rusqlite::{Connection, Error, Result};
 use std::{
     collections::HashMap,
@@ -44,9 +44,9 @@ impl DeckDB {
     }
 
     pub fn update(&mut self, app_id: u64, value: u64) {
-        info!("update with app_id={app_id} value={value}");
+        debug!("update with app_id={app_id} value={value}");
 
-        let cache = self.cache.as_mut().expect("cache not initialized");
+        let cache: &mut HashMap<u64, u64> = self.cache.as_mut().expect("cache not initialized");
         match cache.get_mut(&app_id) {
             Some(entry) => *entry += value,
             None => {
@@ -57,7 +57,7 @@ impl DeckDB {
 
     pub fn commit(&mut self, timestamp: SystemTime) -> Result<()> {
         let timestamp = timestamp.duration_since(UNIX_EPOCH).unwrap().as_secs() / 60 / 60;
-        info!("commit with timestamp={timestamp}");
+        debug!("commit with timestamp={timestamp}");
 
         let tx = self.conn.transaction()?;
         if let Some(cache) = self.cache.as_ref() {

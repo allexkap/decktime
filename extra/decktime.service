@@ -1,0 +1,12 @@
+[Unit]
+Description=decktime service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/decktime
+ExecStart=%h/decktime/decktime -d %h/decktime/deck.db
+Environment="RUST_LOG=info"
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
