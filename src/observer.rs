@@ -18,7 +18,7 @@ fn find_pid_by_name(appname: &str) -> Option<u32> {
         .next()
 }
 
-pub fn get_update_func(ref_db: Rc<RefCell<db::DeckDB>>) -> impl FnMut(SystemTime) {
+pub fn get_update_func(value: u64, ref_db: Rc<RefCell<db::DeckDB>>) -> impl FnMut(SystemTime) {
     let mut ppid = None;
     return move |_| {
         if ppid.is_none() {
@@ -45,7 +45,7 @@ pub fn get_update_func(ref_db: Rc<RefCell<db::DeckDB>>) -> impl FnMut(SystemTime
                     cmdline[pos + 6..pos + len].parse::<u64>().ok()
                 })
                 .unique()
-                .for_each(|app_id| ref_db.borrow_mut().update(app_id, 1));
+                .for_each(|app_id| ref_db.borrow_mut().update(app_id, value));
             return;
         }
         info!("{APP_NAME} pid not found");
