@@ -4,10 +4,11 @@ mod schedule;
 
 use std::{
     cell::RefCell,
+    cmp,
     rc::Rc,
+    thread,
     time::{Duration, SystemTime},
 };
-use std::{cmp, thread};
 
 fn real_sleep(until: SystemTime, interval: Duration) -> SystemTime {
     loop {
@@ -22,7 +23,7 @@ fn real_sleep(until: SystemTime, interval: Duration) -> SystemTime {
 fn main() {
     env_logger::builder().format_timestamp_millis().init();
 
-    let mut db = db::AppDB::build(":memory:").unwrap();
+    let mut db = db::DeckDB::build(":memory:").unwrap();
 
     let now = SystemTime::now();
     db.commit(now).unwrap();
