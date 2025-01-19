@@ -8,6 +8,7 @@ use std::{
     cell::RefCell,
     cmp,
     rc::Rc,
+    sync::{atomic, Arc},
     thread,
     time::{Duration, SystemTime},
 };
@@ -16,15 +17,15 @@ use std::{
 #[command(version = env!("CARGO_PKG_VERSION"))]
 struct Args {
     #[arg(short, default_value = ":memory:")]
-    #[arg(value_name = "PATH", help = "path to the database")]
+    #[arg(value_name = "PATH", help = "Path to the database")]
     db_path: String,
 
     #[arg(short, default_value = "1", value_parser = parse_secs)]
-    #[arg(value_name = "INTERVAL", help = "update interval in seconds")]
+    #[arg(value_name = "INTERVAL", help = "Update interval in seconds")]
     update_interval: Duration,
 
     #[arg(short, default_value = "60", value_parser = parse_secs)]
-    #[arg(value_name = "INTERVAL", help = "commit interval in seconds")]
+    #[arg(value_name = "INTERVAL", help = "Commit interval in seconds")]
     commit_interval: Duration,
 }
 
@@ -63,7 +64,7 @@ fn main() {
         vec![
             (
                 args.commit_interval,
-                Box::new(move |x| ref_db1.borrow_mut().commit(x).unwrap()),
+                Box::new(move |x| ref_db1.borrow_mut().commit(x).expect("commit error")),
             ),
             (
                 args.update_interval,
@@ -76,8 +77,14 @@ fn main() {
         now,
     );
 
-    loop {
+    let term = Arc::new(atomic::AtomicBool::new(false));
+    for sig in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+        signal_hook::flag::register(sig, Arc::clone(&term)).unwrap();
+    }
+    while !term.load(atomic::Ordering::Relaxed) {
         let now = real_sleep(sched.get_next_timestamp().unwrap(), args.update_interval);
         sched.run_pending(now);
     }
+
+    info!("exiting");
 }
