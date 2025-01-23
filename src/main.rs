@@ -3,7 +3,7 @@ mod observer;
 mod schedule;
 
 use clap::Parser;
-use log::info;
+use log::{error, info};
 use std::{
     cell::RefCell,
     cmp,
@@ -52,25 +52,28 @@ fn main() {
 
     let args = Args::parse();
 
-    let mut db = db::DeckDB::build(&args.db_path).unwrap();
-
     let now = SystemTime::now();
-    db.commit(now).unwrap();
+    let db = db::DeckDB::build(&args.db_path, now).expect("create db error");
 
-    let ref_db1 = Rc::new(RefCell::new(db));
-    let ref_db2 = Rc::clone(&ref_db1);
-
+    let ref_db = Rc::new(RefCell::new(db));
     let mut sched = schedule::Scheduler::build_aligned(
         vec![
             (
                 args.commit_interval,
-                Box::new(move |x| ref_db1.borrow_mut().commit(x).expect("commit error")),
+                Box::new(observer::get_commit_func(Rc::clone(&ref_db))),
             ),
             (
                 args.update_interval,
                 Box::new(observer::get_update_func(
                     args.update_interval.as_secs(),
-                    ref_db2,
+                    Rc::clone(&ref_db),
+                )),
+            ),
+            (
+                args.update_interval,
+                Box::new(observer::get_suspend_check_func(
+                    args.update_interval * 2,
+                    Rc::clone(&ref_db),
                 )),
             ),
         ],
@@ -85,6 +88,10 @@ fn main() {
         let now = real_sleep(sched.get_next_timestamp().unwrap(), args.update_interval);
         sched.run_pending(now);
     }
-
     info!("exiting");
+
+    match ref_db.borrow_mut().flush(SystemTime::now()) {
+        Ok(_) => info!("database flushed successfully"),
+        Err(err) => error!("database flush error: {err}"),
+    };
 }
