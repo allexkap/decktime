@@ -1,5 +1,5 @@
 use crate::db;
-use log::{info, warn};
+use log::info;
 use std::{
     cell::RefCell,
     collections::HashSet,
@@ -32,8 +32,6 @@ pub fn get_update_func(value: u64, ref_db: Rc<RefCell<db::DeckDB>>) -> impl FnMu
     let mut apps = HashSet::<u32>::new();
 
     return move |now| {
-        let mut db = ref_db.borrow_mut();
-
         if ppid.is_none() {
             ppid = find_pid_by_name("steam");
             if ppid.is_none() {
@@ -42,8 +40,14 @@ pub fn get_update_func(value: u64, ref_db: Rc<RefCell<db::DeckDB>>) -> impl FnMu
             info!("steam pid={}", ppid.unwrap());
         }
 
+        let mut db = ref_db.borrow_mut();
+
         let Ok(dir) = fs::read_dir(format!("/proc/{}/task", ppid.unwrap())) else {
             info!("steam pid not found");
+            apps.drain().for_each(|app_id| {
+                db.event(now, Some(app_id), db::EventType::Stopped)
+                    .expect("event error")
+            });
             ppid = None;
             return;
         };
@@ -64,7 +68,7 @@ pub fn get_update_func(value: u64, ref_db: Rc<RefCell<db::DeckDB>>) -> impl FnMu
                 } else if closed_apps.remove(&app_id) == true {
                     db.update(app_id, value);
                 } else {
-                    warn!("duplicated app_id={app_id}");
+                    info!("duplicated app_id={app_id}");
                 }
             });
 

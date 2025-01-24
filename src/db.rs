@@ -1,4 +1,4 @@
-use log::{debug, error, info, trace};
+use log::{debug, info, trace, warn};
 use rusqlite::{Connection, Error, Result};
 use std::{
     collections::{HashMap, HashSet},
@@ -6,7 +6,7 @@ use std::{
 };
 
 pub type AppId = u32;
-pub const THIS_APP_ID: AppId = 0;
+const THIS_APP_ID: AppId = 0;
 
 #[derive(Debug, Clone, Copy)]
 pub enum EventType {
@@ -33,12 +33,13 @@ impl DeckDB {
         let mut conn = Connection::open(path)?;
 
         let tx = conn.transaction()?;
+
         tx.execute(
             "create table if not exists objects ( \
                 object_id integer not null, \
                 app_id integer unique not null, \
                 alias text, \
-                primary key (object_id)
+                primary key (object_id) \
             );",
             (),
         )?;
@@ -48,7 +49,7 @@ impl DeckDB {
                 object_id integer not null, \
                 value integer not null, \
                 primary key (timestamp, object_id), \
-                foreign key (object_id) references objects (object_id)
+                foreign key (object_id) references objects (object_id) \
             )",
             (),
         )?;
@@ -58,7 +59,7 @@ impl DeckDB {
                 timestamp integer not null, \
                 object_id integer not null, \
                 event_type integer not null, \
-                foreign key (object_id) references objects (object_id)
+                foreign key (object_id) references objects (object_id) \
             )",
             (),
         )?;
@@ -78,10 +79,10 @@ impl DeckDB {
             },
             running_apps: HashSet::new(),
         };
-        db.load_cache(to_unix_ts(timestamp) / 60 / 60);
+        db.load_cache(to_unix_ts(timestamp) / 60 / 60)?;
         db.event(timestamp, None, EventType::Started)?;
 
-        debug!("database {path:?} opened successfully");
+        info!("database {path:?} opened successfully");
 
         Ok(db)
     }
@@ -102,25 +103,23 @@ impl DeckDB {
         })
     }
 
-    fn load_cache(&mut self, timestamp_h: u64) {
+    fn load_cache(&mut self, timestamp_h: u64) -> Result<()> {
         debug!("loading cache with timestamp={timestamp_h}");
 
-        let mut stmt = self
-            .conn
-            .prepare_cached(
-                "select app_id, value from timeline \
+        let mut stmt = self.conn.prepare_cached(
+            "select app_id, value from timeline \
                 join objects on timeline.object_id = objects.object_id \
                 where timestamp = ?1",
-            )
-            .expect("sql call failed");
+        )?;
 
         let apps = stmt
-            .query_map((timestamp_h,), |row| Ok((row.get(0)?, row.get(1)?)))
-            .expect("sql binding failed")
+            .query_map((timestamp_h,), |row| Ok((row.get(0)?, row.get(1)?)))?
             .filter_map(Result::ok)
             .collect();
 
         self.cache = AppCache { apps, timestamp_h };
+
+        Ok(())
     }
 
     fn dump_cache(&mut self) -> Result<()> {
@@ -128,9 +127,8 @@ impl DeckDB {
 
         let tx = self.conn.transaction()?;
         {
-            let mut stmt = tx
-                .prepare_cached("insert or replace into timeline values (?1, ?2, ?3)")
-                .expect("sql call failed");
+            let mut stmt =
+                tx.prepare_cached("insert or replace into timeline values (?1, ?2, ?3)")?;
             for (&app_id, &value) in self.cache.apps.iter() {
                 let object_id = Self::get_object_id(&(*tx), app_id)?;
                 stmt.execute((self.cache.timestamp_h, object_id, value))?;
@@ -159,8 +157,8 @@ impl DeckDB {
 
         self.dump_cache()?;
         if timestamp_h != self.cache.timestamp_h {
-            info!("reload cache with timestamp={timestamp_h}");
-            self.load_cache(timestamp_h);
+            debug!("reload cache with timestamp={timestamp_h}");
+            self.load_cache(timestamp_h)?;
         }
 
         Ok(())
@@ -176,7 +174,7 @@ impl DeckDB {
 
         let app_id = match app_id {
             Some(app_id) => {
-                info!("new event: app_id={app_id}; event_type={event_type:?}");
+                info!("new event with app_id={app_id} and event_type={event_type:?}");
                 app_id
             }
             None => THIS_APP_ID,
@@ -187,18 +185,35 @@ impl DeckDB {
         match event_type {
             EventType::Started | EventType::Stopped => {
                 let object_id = Self::get_object_id(&self.conn, app_id)?;
-                self.conn
-                    .execute(SQL_INSERT, (timestamp_s, object_id, event_type as u32))?;
+                let tx = self.conn.transaction()?;
+                let count = tx.execute(
+                    "delete from events where event_type = ?1 and object_id = ?2",
+                    (EventType::Running as u32, object_id),
+                )?;
+                if count > 1 {
+                    warn!(
+                        "multiple rows with app_id={app_id} and type={:?} were deleted",
+                        EventType::Running
+                    );
+                }
+                tx.execute(SQL_INSERT, (timestamp_s, object_id, event_type as u32))?;
+                tx.commit()?;
             }
 
             EventType::Suspended | EventType::Resumed | EventType::Running => {
                 let tx = self.conn.transaction()?;
                 if let EventType::Running = event_type {
                     assert_eq!(EventType::Running as u32, 0);
-                    tx.execute(
+                    let count = tx.execute(
                         "delete from events where event_type = ?1",
                         (EventType::Running as u32,),
                     )?;
+                    if count > self.running_apps.len() {
+                        warn!(
+                            "count of deleted and inserted back rows with type={:?} does not match",
+                            EventType::Running
+                        );
+                    }
                 }
                 {
                     let mut stmt = tx.prepare_cached(SQL_INSERT)?;
@@ -221,7 +236,7 @@ impl DeckDB {
         };
 
         if !ok {
-            error!("duplicated event: app_id={app_id}; event_type={event_type:?}");
+            warn!("duplicated event with app_id={app_id} and event_type={event_type:?}");
         }
 
         Ok(())
@@ -239,7 +254,7 @@ impl DeckDB {
 impl Drop for DeckDB {
     fn drop(&mut self) {
         if !self.running_apps.is_empty() {
-            error!("running_apps is not empty");
+            warn!("running_apps is not empty");
         }
     }
 }
