@@ -324,3 +324,66 @@ impl Drop for DeckDB {
 fn to_unix_ts(timestamp: SystemTime) -> u64 {
     timestamp.duration_since(UNIX_EPOCH).unwrap().as_secs()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, time::Duration};
+
+    use super::*;
+
+    fn time(n: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(n)
+    }
+
+    #[test]
+    fn timetraveler() {
+        env_logger::builder().init();
+
+        let path = "./test.db";
+        let app_id = Some(1);
+
+        let _ = fs::remove_file(path);
+        let mut db = DeckDB::build(path, time(1000)).unwrap();
+
+        db.event(time(1010), app_id, EventType::Started).unwrap();
+        db.event(time(1050), app_id, EventType::Running).unwrap();
+        drop(db);
+
+        let mut db = DeckDB::build(path, time(1010)).unwrap();
+        db.event(time(1020), None, EventType::Suspended).unwrap();
+        db.event(time(1040), None, EventType::Resumed).unwrap();
+        db.flush(time(1050)).unwrap();
+        drop(db);
+
+        let db = DeckDB::build(path, time(2000)).unwrap();
+        let mut stmt = db.conn.prepare("select * from events").unwrap();
+        let mut data = stmt
+            .query_map((), |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect::<Vec<(u32, u32, u32)>>();
+        data.sort();
+        assert_eq!(
+            data,
+            vec![
+                (1000, 1, 1),
+                (1010, 1, 1),
+                (1010, 2, 1),
+                (1020, 1, 3),
+                (1040, 1, 4),
+                (1050, 1, 2),
+                (2000, 1, 1)
+            ]
+        );
+        let mut stmt = db.conn.prepare("select * from backup_events").unwrap();
+        let mut data = stmt
+            .query_map((), |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect::<Vec<(u32, u32, u32, u32)>>();
+        data.sort();
+        assert_eq!(data, vec![(1, 1050, 1, 2), (1, 1050, 2, 2)]);
+    }
+}
