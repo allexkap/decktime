@@ -1,4 +1,4 @@
-use log::{debug, info, trace, warn};
+use log::{debug, error, info, trace, warn};
 use rusqlite::{Connection, Error, Result};
 use std::{
     collections::{HashMap, HashSet},
@@ -24,6 +24,7 @@ struct AppCache {
 
 pub struct DeckDB {
     conn: Connection,
+    last_timestamp: u64,
     cache: AppCache,
     running_apps: HashSet<AppId>,
 }
@@ -43,6 +44,27 @@ impl DeckDB {
             );",
             (),
         )?;
+
+        tx.execute(
+            "create table if not exists backup_info ( \
+                backup_id integer not null, \
+                start_ts integer not null, \
+                end_ts integer not null, \
+                primary key (backup_id) \
+            );",
+            (),
+        )?;
+        tx.execute(
+            "create table if not exists backup_events ( \
+                backup_id integer not null, \
+                timestamp integer not null, \
+                object_id integer not null, \
+                event_type integer not null, \
+                foreign key (backup_id) references backup_info (backup_id) \
+            );",
+            (),
+        )?;
+
         tx.execute(
             "create table if not exists timeline ( \
                 timestamp integer not null, \
@@ -53,7 +75,6 @@ impl DeckDB {
             )",
             (),
         )?;
-
         tx.execute(
             "create table if not exists events ( \
                 timestamp integer not null, \
@@ -63,22 +84,29 @@ impl DeckDB {
             )",
             (),
         )?;
+
         assert_eq!(EventType::Running as u32, 0);
         tx.execute(
             "update events set event_type = ?1 where event_type = ?2",
             (EventType::Stopped as u32, EventType::Running as u32),
         )?;
 
+        let last_timestamp: u64 = tx.query_row("select max(timestamp) from events", (), |row| {
+            row.get(0).or(Ok(0))
+        })?;
+
         tx.commit()?;
 
         let mut db = DeckDB {
             conn,
+            last_timestamp,
             cache: AppCache {
                 apps: HashMap::new(),
                 timestamp_h: 0,
             },
             running_apps: HashSet::new(),
         };
+        db.validate_timestamp(timestamp)?;
         db.load_cache(to_unix_ts(timestamp) / 60 / 60)?;
         db.event(timestamp, None, EventType::Started)?;
 
@@ -101,6 +129,36 @@ impl DeckDB {
             ),
             err => Err(err),
         })
+    }
+
+    fn validate_timestamp(&mut self, timestamp: SystemTime) -> Result<()> {
+        let timestamp_s = to_unix_ts(timestamp);
+
+        if timestamp_s < self.last_timestamp {
+            let tx = self.conn.transaction()?;
+            let backup_id: u64 = tx.query_row(
+                "insert into backup_info (start_ts, end_ts) values (?1, ?2) returning backup_id",
+                (timestamp_s, self.last_timestamp),
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "insert into backup_events \
+                (backup_id, timestamp, object_id, event_type) \
+                select ?1, timestamp, object_id, event_type from events \
+                where timestamp > ?2 \
+                order by rowid asc",
+                (backup_id, timestamp_s),
+            )?;
+            tx.execute("delete from events where timestamp > ?1", (timestamp_s,))?;
+            tx.commit()?;
+            error!(
+                "new timestamp in the past, moving events between {} and {} to backup #{backup_id}",
+                timestamp_s, self.last_timestamp
+            );
+        };
+
+        self.last_timestamp = timestamp_s;
+        Ok(())
     }
 
     fn load_cache(&mut self, timestamp_h: u64) -> Result<()> {
@@ -150,6 +208,8 @@ impl DeckDB {
     }
 
     pub fn commit(&mut self, timestamp: SystemTime) -> Result<()> {
+        self.validate_timestamp(timestamp)?;
+
         let timestamp_h = to_unix_ts(timestamp) / 60 / 60;
         debug!("commit with timestamp={timestamp_h}");
 
@@ -170,6 +230,8 @@ impl DeckDB {
         app_id: Option<AppId>,
         event_type: EventType,
     ) -> Result<()> {
+        self.validate_timestamp(timestamp)?;
+
         let timestamp_s = to_unix_ts(timestamp);
 
         let app_id = match app_id {
